@@ -1,0 +1,1646 @@
+#include "DEV_Config.h"
+#include "LCD_Driver.h"
+#include "LCD_GUI.h"
+#include "fonts.h"
+
+#define WHITE          0xFFFF
+#define BLACK          0x0000
+#define BLUE           0x001F
+#define RED            0xF800
+#define MAGENTA        0xF81F
+#define GREEN          0x07E0
+#define CYAN           0x7FFF
+#define YELLOW         0xFFE0
+#define GRAY           0X8430
+#define PINK           0xFC0F
+#define ORANGE         0xFDC0
+#define GELB           0xFF00
+#define GRUN           0x2DC3
+#define BLAU           0x0094
+
+
+const int JOYSTICK_BUFFER = 3;
+//const int PLAYER_ONE_JOYX = A1; // 0
+const int PLAYER_ONE_JOYY = A0; // 1 BLAU
+//const int PLAYER_ONE_BUTTON = A5;
+//const int PLAYER_TWO_JOYX = A2; // A2
+const int PLAYER_TWO_JOYY = A3; // A3
+//const int PLAYER_TWO_BUTTON = A4;
+
+
+const int width = 480;
+const int height = 320;
+const int LINE_WIDTH = 2;
+const int SCORE_LIMIT = 10;
+const int playerRacketX = 10;
+const int playerRacketY = 55;
+const int pointDimension = 8;
+const int powerUpDimension = 30;
+const int pointInitial = (480 / 2) - (pointDimension / 2);
+const int POWERUP_WAITTIME = 10000;
+sFONT *myFont = &Font24;
+const unsigned long SCORE_WAIT = 5000;
+bool beforeGameStarted = false;
+bool beforeChoice = true;
+int numberOfPowerUps = 0;
+int numberOfBalls = 0;
+bool flashingBalls = false;
+bool scoredPoint = false;
+bool showStartBall = false;
+bool nextPowerUp = false;
+int xDirStartBall = 1;
+unsigned long scoreTime = 0;
+unsigned long startTime = 0;
+int winDecision = 0; // 1 Lose SP, 2 Win SP, 3 One MP, 4 Two MP
+bool gameStarted = false;
+
+enum GameMode
+{
+  BEFORE,
+  SINGLEPLAYER,
+  MULTIPLAYER
+};
+GameMode modi = BEFORE;
+
+// ------ SPIELER 1 ------ (rechter Spieler)
+
+int playerOneReady = 0; // beide Spieler müssen etwas machen, bevor das Spiel startet
+int playerOneScore = 0;
+int prevPlayerOneScore = 0;
+int playerOneRacketX = LCD_X_MAXPIXEL - playerRacketX - 10; // BLAU
+int playerOneRacketY = 150;
+int prevPlayerOneRacketY = playerOneRacketY;
+int playerOneRacketHeight = 40;
+int playerOneRacketVelocity = 0; // das sollte der Input des Controllers sein
+
+// ------ SPIELER 2 ------ (linker Spieler)
+
+int playerTwoReady = 0;
+int playerTwoScore = 0;
+int prevPlayerTwoScore = 0;
+int playerTwoRacketX = 10; // ROT
+int playerTwoRacketY = 150;
+int playerTwoRacketHeight = 40;
+int prevPlayerTwoRacketY = playerTwoRacketY;
+int playerTwoRacketVelocity = 0; // das soll der Input des Controllers sein
+
+// ------ PUNKT -------
+// Der Punkt soll in der Mitte des Bildes starten
+int xPos = pointInitial;
+int yPos = 155;
+
+// Wo befindet sich der Punkt nun?
+int xPrev = xPos;
+int yPrev = yPos;
+
+// Geschwindigkeit / Richtung
+int xDir = 2;
+int yDir = 2;
+
+struct PowerUp {
+  int xPos;
+  int yPos;
+  int type; // 0 = Speed, 1 = new Ball, 2 = Racket, 3 = flashing lights
+  COLOR color;
+
+  PowerUp() : type(0), xPos(0), yPos(0), color(WHITE) {}
+
+  PowerUp(int t, GameMode modi) :type(t) {
+    switch (t) {
+      case 0:
+        color = PINK;
+        break;
+      case 1:
+        color = CYAN;
+        break;
+      case 2:
+        color = YELLOW;
+        break;
+      case 3:
+        color = WHITE;
+        break;
+    }
+    if (modi == SINGLEPLAYER) {
+      xPos = (millis() % 220) + 200;
+      yPos = (millis() % 290) + 10;
+    } else { // Multiplayer
+      int redOrBlue = (millis() % 2);
+      if (redOrBlue == 0) {
+        xPos = (millis() % 110) + 30;
+      } else {
+        xPos = (millis() % 110) + 310;
+      } 
+      yPos = (millis() % 270) + 10;
+    }
+    numberOfPowerUps++;
+  }
+};
+
+struct Ball {
+  int xPos;
+  int yPos;
+  int xPrev;
+  int yPrev;
+  int xDir;
+  int yDir;
+
+  // Ball(bool) is used in SinglePlayer, as the position of the ball is fixed at the start.
+  Ball() : xPos(pointInitial), yPos(155), xPrev(pointInitial), yPrev(155), xDir((millis() % 3) + 2), yDir(millis() % 4) {}
+  Ball(GameMode modi) : xPos(400), yPos(155), xPrev(400), yPrev(155), xDir((-1) * ((millis() % 2) + 1)), yDir(millis() % 2) {}
+};
+// ------------ BRICK BREAK -----------
+const int BRICK_ROW = 5;
+const int BRICK_COL = 5;
+int currentRow = 0;
+int currentCol = 0;
+const int FIELD_WIDTH = 200;
+int clearedColorFields = 0;
+
+struct ColorField {
+  int xPos;
+  int yPos;
+  int xEndPos;
+  int yEndPos;
+  COLOR color;
+
+  /* 
+  * x = Row, y = Col
+  */
+  ColorField(int x, int y): xPos(y * (FIELD_WIDTH / BRICK_COL)), yPos(x * (height / BRICK_ROW)), xEndPos(xPos + (FIELD_WIDTH / BRICK_COL)), yEndPos(yPos + (height / BRICK_ROW)) {
+    switch (y) {
+      case 0:
+        color = RED;
+        break;
+      case 1:
+        color = ORANGE;
+        break;
+      case 2:
+        color = GELB;
+        break;
+      case 3:
+        color = GRUN;
+        break;
+      case 4:
+        color = BLAU;
+        break;
+    }
+  }
+
+  /*
+  *   Sets the color one grade lower. Used strictly in singlePlayer.
+  */
+  void decreaseColor() {
+    if (color != BLACK) {
+      switch (color) {
+        case RED:
+          color = ORANGE;
+          break;
+        case ORANGE:
+          color = GELB;
+          break;
+        case GELB:
+          color = GRUN;
+          break;
+        case GRUN:
+          color = BLAU;
+          break;
+        case BLAU:
+          color = BLACK; // GRED
+          clearedColorFields += 1;
+          break;
+      }
+    } else {
+      color = BLACK;
+    }
+  }
+
+  ColorField() : xPos(0), yPos(0), color(WHITE) {};
+};
+
+ColorField bricks[BRICK_ROW][BRICK_COL];
+Ball balls[3];
+Ball newBalls[3];
+PowerUp powerUps[5];
+PowerUp newPowerUps[5];
+
+void setup()
+{
+  Serial.begin(11520);
+  System_Init();
+  LCD_SCAN_DIR Lcd_ScanDir = SCAN_DIR_DFT;  
+  LCD_Init( Lcd_ScanDir, 100);
+  GUI_Clear(BLACK);
+  displayStartScreen(); // StartScreen mit PONG+
+  Serial.println("LCD_Clear...");
+  Serial.println("LCD_Show...");
+  pinMode(PLAYER_ONE_JOYY, INPUT);
+  pinMode(PLAYER_TWO_JOYY, INPUT);
+  pinMode(9, OUTPUT);
+  playerOneRacketHeight = playerTwoRacketHeight = playerRacketY;
+  clearPowerUps();
+}
+
+void loop() {
+  digitalWrite(9, HIGH);
+  if (beforeChoice)
+  {
+    // After initiating game, our title screen is being displayed.
+    beforeChoice = false;
+    delay(3000);
+    showChoiceScreen();
+  }
+
+  handleButtonOne();
+  handleButtonTwo();
+
+  if (modi == SINGLEPLAYER)
+  {
+    // Switch to different Game
+    if (playerOneReady == 1) {
+      LCD_Clear(BLACK);
+      playerOneRacketHeight += 30;
+      initializeBrickField();
+      colorField();
+      clearBalls();
+      //clearPowerUps();
+      powerUps[5];
+      newPowerUps[5];
+      balls[0] = Ball(modi);
+      numberOfBalls = 1;
+      numberOfPowerUps = 0;
+      newBalls[0] = balls[0];
+      playerOneReady = 2;
+      countdown(280, 122);
+    } else {
+      printPrevGame();
+      positionRacketOne();
+      colorFieldAfterHit(currentCol, currentRow);
+      // Now iterating over every ball
+      for (int i = 0; i < numberOfBalls; ++i)
+      {
+        Ball& currentBall = balls[i];
+        if (currentBall.xPos >= width)
+        {
+          // Game is over, when the last ball exits
+          if (numberOfBalls == 1) {
+            winDecision = 1;
+            endGame(); 
+            return;
+          }
+          LCD_SetArealColor(currentBall.xPos, currentBall.yPos, currentBall.xPos + pointDimension, currentBall.yPos + pointDimension, BLACK);
+          LCD_SetArealColor(currentBall.xPrev, currentBall.yPrev, currentBall.xPrev + pointDimension, currentBall.yPrev + pointDimension, BLACK);
+          for (int k = i; k < numberOfBalls; ++k) 
+          {
+            balls[k] = balls[k + 1];
+          }
+          numberOfBalls = numberOfBalls - 1;
+        }
+      }
+      
+      displayBalls();
+      for (int i = 0; i < numberOfBalls; ++i)
+      {
+        Ball& currentBall = balls[i];
+        updateBallCoordinates(currentBall);
+        hitRacket(currentBall);
+        currentBall.xPos = currentBall.xPrev + currentBall.xDir;
+        currentBall.yPos = currentBall.yPrev + currentBall.yDir;
+        hitColorField(currentBall); // checks if field got hit and updates it
+        if (numberOfPowerUps != 0) { // Check if PowerUp got hit
+          handlePowerUpTrigger(currentBall);
+        }
+        updateBallCollision(currentBall);
+      }
+    
+      printCurrentGame();
+      // Generates a new powerup.
+      if (numberOfPowerUps <= 4 && nextPowerUp)
+      { 
+        nextPowerUp = false;
+        int buffRed = (millis() % 5); // 0 1 2 3 4
+        int oldNumberOfPowerUps = numberOfPowerUps;
+        if (buffRed == 0 || buffRed == 1) { // RED-Ballpowerup should appear more often because fun. (40% chance)
+          powerUps[oldNumberOfPowerUps] = PowerUp(0, modi);
+        } else {
+          powerUps[oldNumberOfPowerUps] = PowerUp((millis() % 3) + 1, modi);
+        }
+        newPowerUps[oldNumberOfPowerUps] = powerUps[oldNumberOfPowerUps];
+      }
+      if (numberOfPowerUps != 0) {
+        displayPowerUps();
+      }
+      if (clearedColorFields == BRICK_ROW*BRICK_COL) // || numberOfBalls == 0
+      {
+        winDecision = 2;
+        endGame();
+      }
+    }
+  }
+  if (modi == MULTIPLAYER) 
+  {
+    showMultiplayerField();
+    if (playerOneReady == 1 && playerTwoReady == 1){
+      createGame();
+    }
+
+    if (scoredPoint)
+    {
+      if ((millis() - scoreTime) <= SCORE_WAIT)
+      {
+        if (showStartBall) {
+          balls[0] = Ball();
+          balls[0].xDir = xDirStartBall * ((millis() % 3) + 2);
+          numberOfBalls = 1;
+          numberOfPowerUps = 0;
+          displayBalls();
+          showStartBall = false;
+          playerOneRacketHeight = playerRacketY;
+          playerTwoRacketHeight = playerRacketY;
+          newPowerUps[5];
+        }
+        nextPowerUp = false;
+        updateGame();
+      } else {
+        scoredPoint = false;
+        updateGame();
+      }
+      return;
+    }
+    if (playerOneReady == 2 && playerTwoReady == 2) 
+    {
+      if (playerOneScore == SCORE_LIMIT || playerTwoScore == SCORE_LIMIT) 
+      {
+        if (playerOneScore == SCORE_LIMIT) {
+          winDecision = 4;
+        } else {
+          winDecision = 3; 
+        }
+        endGame();
+        return;
+      }
+      
+      for (int i = 0; i < numberOfBalls; ++i) {
+        Ball& currentBall = balls[i];
+
+        updateBallCoordinates(currentBall);
+        updateBallCollision(currentBall);
+
+        if (numberOfPowerUps != 0) { // Check if PowerUp got hit
+          handlePowerUpTrigger(currentBall);
+        }
+      }
+      for (int i = 0; i < numberOfBalls; ++i) {
+        Ball& cBall = balls[i];
+        hitRacket(cBall); // Wird der Ball vom Spieler geschossen?
+      }
+      // if all the balls are still in the game
+      if (!scoredPoint)
+      {
+        for (int i = 0; i < numberOfBalls; ++i) {
+          Ball& currentBall = balls[i];
+          currentBall.xPos = currentBall.xPrev + currentBall.xDir;
+          currentBall.yPos = currentBall.yPrev + currentBall.yDir;
+        }
+      }
+      if (numberOfPowerUps <= 4 && nextPowerUp)
+      { 
+        nextPowerUp = false;
+        int buffRed = (millis() % 5); // 0 1 2 3 4
+        int oldNumberOfPowerUps = numberOfPowerUps;
+        if (buffRed == 0 || buffRed == 1) { // RED-Ballpowerup should appear more often because fun. (40% chance)
+          powerUps[oldNumberOfPowerUps] = PowerUp(0, modi);
+        } else {
+          powerUps[oldNumberOfPowerUps] = PowerUp((millis() % 3) + 1, modi);
+        }
+        newPowerUps[oldNumberOfPowerUps] = powerUps[oldNumberOfPowerUps];
+        displayPowerUps();
+      }
+      updateGame();
+    }
+  }
+}
+
+/*
+*   Handles inputs of player one.
+*/
+void handleButtonOne() 
+{
+  // Lesen Sie den Joystick-Wert und passen Sie ihn an den Bereich -5 bis 5 an  
+  int joystickValue = map(analogRead(PLAYER_ONE_JOYY), 0, 1023, -5, 5); // X
+
+  if (modi == BEFORE && abs(joystickValue) > JOYSTICK_BUFFER) {
+    if (joystickValue > 0) {
+      modi = SINGLEPLAYER;
+    }
+    if (joystickValue < 0) {
+      modi = MULTIPLAYER;
+      return;
+    }
+  } else {
+    if (modi != BEFORE && playerOneReady == 0 && abs(joystickValue) > JOYSTICK_BUFFER) {
+      playerOneReady = 1;
+    }
+    if (playerOneReady != 2) { return; }
+    if (abs(joystickValue) < 2) {
+      playerOneRacketVelocity = 0;
+      return;
+    }
+    playerOneRacketVelocity = joystickValue;
+  }
+}
+
+/*
+*   Handles inputs of player two.
+*/
+void handleButtonTwo() 
+{
+  int joystickValue = map(analogRead(PLAYER_TWO_JOYY), 0, 1023, 5, -5); // Y
+  if (modi == BEFORE && (abs(joystickValue) > JOYSTICK_BUFFER)) {
+    if (joystickValue > 0) {
+      modi = SINGLEPLAYER;
+    }
+    if (joystickValue < 0) {
+      modi = MULTIPLAYER;
+      return;
+    }
+  } else {
+    if (modi == MULTIPLAYER && playerTwoReady == 0 && (abs(joystickValue) > JOYSTICK_BUFFER)) {
+      playerTwoReady = 1;
+    }
+    if (playerTwoReady != 2) { return; }
+    // joystick drift
+    if (abs(joystickValue) < 2) {
+      playerTwoRacketVelocity = 0;
+      return;
+    }
+    playerTwoRacketVelocity = joystickValue;
+  }
+}
+
+/**
+*   If game ends in both Singleplayer and Multiplayer.
+*/
+void endGame()
+{
+  modi = BEFORE;
+  playerOneScore = 0;
+  playerTwoScore = 0;
+  clearedColorFields = 0;
+  playerOneReady = 0;
+  playerTwoReady = 0;
+  prevPlayerOneScore = 0;
+  prevPlayerTwoScore = 0;
+  nextPowerUp = false;
+  gameStarted = false;
+  playerOneRacketY = playerTwoRacketY = 150;
+  playerTwoRacketHeight = playerOneRacketHeight = playerRacketY;
+  beforeGameStarted = false;
+  xDirStartBall = 1; // idk
+  clearPowerUps();
+  clearBalls();
+  showEndScreen();
+}
+
+
+/**
+*   If the ball gets hit by a racket, the ball gets sped up accordingly.
+*/
+void hitRacket(Ball& ball)
+{
+  const int powerUpGen = millis() % 5;
+  const int threshold = 26;
+  if (inRacket(ball)) 
+  {
+    // After a hit there is a 60% for a powerup to be displayed. The powerup gets added later on.
+    nextPowerUp = (powerUpGen <= 2);
+    ball.xDir *= -1; // prallt ab
+    if (ball.xPos < 200) // >
+    {
+      // SPIELER 2
+      if (!(abs(ball.yDir) * playerTwoRacketVelocity > threshold) && ball.yDir != 0)
+      {
+        if (ball.yDir < 0 && playerTwoRacketVelocity < 0) // Ball nach unten, racket nach unten
+        {
+          ball.yDir -= playerTwoRacketVelocity; // Ball bekommt drall nach unten
+        } 
+        if (ball.yDir > 0 && playerTwoRacketVelocity > 0) // Ball nach oben, racket nach oben
+        {
+          ball.yDir += playerTwoRacketVelocity;
+        }
+        if ((ball.yDir > 0 && playerTwoRacketVelocity < 0) || (ball.yDir > 0 && playerTwoRacketVelocity < 0)) // Ball unten/oben, racket oben/unten
+        {
+          if (playerTwoRacketVelocity < 0) // Racket nach unten
+          {
+            ball.yDir -= (playerTwoRacketVelocity % 2) + 1;
+          } else {
+            ball.yDir += (playerTwoRacketVelocity % 2) + 1;
+          }
+        }
+        if (ball.yDir == 0) 
+        {
+          ball.yDir = (millis() % 2 == 0) ? -1 : 1;
+        }
+      }
+    } else {
+      if (!(abs(ball.yDir) * playerOneRacketVelocity > threshold) && ball.yDir != 0)
+      {
+        if (ball.yDir < 0 && playerOneRacketVelocity < 0) 
+        {
+          ball.yDir -= playerOneRacketVelocity;
+        } 
+        if (ball.yDir > 0 && playerOneRacketVelocity > 0) 
+        {
+          ball.yDir += playerOneRacketVelocity;
+        }
+        if ((ball.yDir > 0 && playerOneRacketVelocity < 0) || (ball.yDir > 0 && playerOneRacketVelocity < 0)) 
+        {
+          if (playerOneRacketVelocity < 0)
+          {
+            ball.yDir -= (playerOneRacketVelocity % 2) + 1;
+          } else {
+            ball.yDir += (playerOneRacketVelocity % 2) + 1;
+          }
+        }
+        if (ball.yDir == 0) 
+        {
+          ball.yDir = (millis() % 2 == 0) ? -1 : 1;
+        }
+      }
+    }
+    if ((ball.xDir >= 1 && ball.yDir == 0) || (ball.xDir <= -1 && ball.yDir == 0)) 
+    {
+      ball.yDir = (millis() % 2 == 0) ? -1 : 1;
+    }
+    if (ball.xDir == 1) 
+    {
+      ball.xDir = 2;
+    }
+    if (ball.xDir == -1) 
+    {
+      ball.xDir = -2;
+    }
+  }
+}
+
+/**
+*   Returns boolean to determine whether the ball is in a player's racket or not.
+*/
+bool inRacket(Ball& ball) 
+{
+    if (modi == MULTIPLAYER && (((ball.xPos >= playerTwoRacketX && ball.xPos <= playerTwoRacketX + playerRacketX) && (ball.yPos >= playerTwoRacketY && ball.yPos <= playerTwoRacketY + playerTwoRacketHeight)) // linke obere Ecke
+        || ((ball.xPos >= playerTwoRacketX && ball.xPos <= playerTwoRacketX + playerRacketX) && (ball.yPos + pointDimension >= playerTwoRacketY && ball.yPos + pointDimension <= playerTwoRacketY + playerTwoRacketHeight)) // linke untere Ecke
+        ))
+    {
+        return true;
+    }
+    else if (((ball.xPos  + pointDimension >= playerOneRacketX && ball.xPos  + pointDimension <= playerOneRacketX + playerRacketX) && (ball.yPos >= playerOneRacketY && ball.yPos <= playerOneRacketY + playerOneRacketHeight)) // rechte obere Ecke
+        || ((ball.xPos  + pointDimension >= playerOneRacketX && ball.xPos  + pointDimension <= playerOneRacketX + playerRacketX) && (ball.yPos + pointDimension >= playerOneRacketY && ball.yPos + pointDimension <= playerOneRacketY + playerOneRacketHeight)) // rechte untere Ecke
+        ) 
+    {
+        return true;
+    }
+    else 
+    {
+        return false;
+    }
+}
+
+/*
+*   Updates coordinates of player one's racket. 
+*/
+void positionRacketOne()
+{
+  prevPlayerOneRacketY = playerOneRacketY;
+  if ((playerOneRacketY + playerOneRacketVelocity + playerOneRacketHeight) >= height) // Racket ist am unteren Rand
+  {
+    playerOneRacketY = height - playerOneRacketHeight;
+  }
+  else if (playerOneRacketY + playerOneRacketVelocity <= 0) // Racket ist am oberen Rand
+  {
+    playerOneRacketY = 0;
+  }
+  else
+  {
+    playerOneRacketY = playerOneRacketY + playerOneRacketVelocity;
+  }
+}
+
+/*
+*   Updates player two's racket coordinates.
+*/
+void positionRacketTwo()
+{
+  prevPlayerTwoRacketY = playerTwoRacketY;
+  if ((playerTwoRacketY + playerTwoRacketVelocity + playerTwoRacketHeight) >= height) // Racket ist am unteren Rand gewechselt von playerTwo
+  {
+    playerTwoRacketY = height - playerTwoRacketHeight;
+  }
+  else if (playerTwoRacketY + playerTwoRacketVelocity <= 0) // Racket ist am oberen Rand
+  {
+    playerTwoRacketY = 0;
+  }
+  else
+  {
+    playerTwoRacketY = playerTwoRacketY + playerTwoRacketVelocity;
+  }
+}
+
+/*
+*   This method prints the current components of the multiplayer game.
+*/
+void printCurrentGame()
+{
+  if (modi == MULTIPLAYER) {
+    LCD_SetArealColor(playerTwoRacketX, playerTwoRacketY, playerTwoRacketX + playerRacketX, playerTwoRacketY + playerTwoRacketHeight, RED);
+    printMiddleLineAndScore();
+  }
+  LCD_SetArealColor(playerOneRacketX, playerOneRacketY, playerOneRacketX + playerRacketX, playerOneRacketY + playerOneRacketHeight, BLUE);
+}
+
+/*
+*   This method removes the previous components of the multiplayer game.
+*/
+void printPrevGame()
+{
+  if (prevPlayerOneRacketY != playerOneRacketY) {
+    LCD_SetArealColor(playerOneRacketX, prevPlayerOneRacketY, playerOneRacketX + playerRacketX, playerOneRacketY, BLACK);
+    LCD_SetArealColor(playerOneRacketX, playerOneRacketY + playerOneRacketHeight, playerOneRacketX + playerRacketX, prevPlayerOneRacketY + playerOneRacketHeight, BLACK);
+    //LCD_SetArealColor(playerOneRacketX, 0, playerOneRacketX + playerRacketX, height, BLACK); // scheint Leistung zu beeinträchtigen
+  }
+  if (prevPlayerTwoRacketY != playerTwoRacketY && modi == MULTIPLAYER) {
+    LCD_SetArealColor(playerTwoRacketX, prevPlayerTwoRacketY, playerTwoRacketX + playerRacketX, playerTwoRacketY, BLACK);
+    LCD_SetArealColor(playerTwoRacketX, playerTwoRacketY + playerTwoRacketHeight, playerTwoRacketX + playerRacketX, prevPlayerTwoRacketY + playerTwoRacketHeight, BLACK);
+  }
+}
+
+/*
+*   This method prints the inital components of the multiplayer game.
+*/
+void showMultiplayerField() {
+  if (!beforeGameStarted) 
+  {
+    LCD_Clear(BLACK);
+    beforeGameStarted = true;
+    LCD_SetArealColor(playerOneRacketX, playerOneRacketY, playerOneRacketX + playerRacketX, playerOneRacketY + playerOneRacketHeight, BLUE);
+    LCD_SetArealColor(playerTwoRacketX, playerTwoRacketY, playerTwoRacketX + playerRacketX, playerTwoRacketY + playerTwoRacketHeight, RED);
+    for (int i = 0; i < numberOfBalls; ++i) {
+      Ball& currentBall = balls[i];
+      LCD_SetArealColor(currentBall.xPos, currentBall.yPos, currentBall.xPos + pointDimension, currentBall.yPos + pointDimension, GREEN);
+    }
+    printMiddleLineAndScore();
+    GUI_DisString_EN(50, 160, "MOVE JOYSTICKS TO START", &Font24, BLACK, WHITE );
+  }
+}
+
+/*
+*   This method gets called, if a point is scored in the multiplayer game and resets all the important settings.
+*/
+void scorePoint()
+{
+  scoredPoint = true;
+  scoreTime = millis();
+  clearPowerUps();
+  clearBalls();
+  playerTwoRacketHeight = playerOneRacketHeight = playerRacketY;
+  LCD_SetArealColor(25, 10, 170, 300, BLACK);
+  LCD_SetArealColor(310, 10, 455, 300, BLACK);
+  LCD_SetArealColor(0, 0, 20, 320, BLACK);
+  LCD_SetArealColor(460, 0, 480, 320, BLACK);
+  showStartBall = true;
+}
+
+/*
+*   Prints the middle line and the scoreboard.
+*/
+void printMiddleLineAndScore()
+{
+  int scorePlayerTwoX = (width / 2) + 10;
+  int scorePlayerOneX = (width / 2) - 30;
+  LCD_SetArealColor((width / 2) - (LINE_WIDTH / 2), 0, (width / 2) + (LINE_WIDTH / 2), height, WHITE);
+  printScore();
+}
+
+/*
+*   Prints the score of each player. Each number is implemented seperately.
+*/
+void printScore()
+{
+  if (prevPlayerOneScore != playerOneScore) // löscht bei Punktzahlerhöhung die vorherige Zahl
+  {
+    LCD_SetArealColor((width / 2) - 72, 9, (width / 2) - 9, 54, BLACK); // Zahl wieder zu Background
+    prevPlayerOneScore = playerOneScore;
+  }
+  switch (playerOneScore) {
+    case 0:
+      LCD_SetArealColor((width / 2) - 36, 9, (width / 2) - 9, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) - 18, 18, (width / 2) - 9, 54, WHITE); // rechte Senkrechte (4 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 18, (width / 2) - 27, 45, WHITE); // linke Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 45, (width / 2) - 18, 54, WHITE); // Boden (2 Pixel)
+      break;
+    case 1:
+      LCD_SetArealColor((width / 2) - 36, 9, (width / 2) - 18, 18, WHITE); // Dach (2 Pixel)
+      LCD_SetArealColor((width / 2) - 27, 18, (width / 2) - 18, 45, WHITE); // mitte Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 45, (width / 2) - 9, 54, WHITE); // Boden (3 Pixel)
+      break;
+    case 2:
+      LCD_SetArealColor((width / 2) - 36, 9, (width / 2) - 9, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) - 18, 18, (width / 2) - 9, 36, WHITE); // rechte Senkrechte (2 Pixel)
+      LCD_SetArealColor((width / 2) - 27, 27, (width / 2) - 18, 36, WHITE); // Mittelpunkt (1 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 27, (width / 2) - 27, 45, WHITE); // linke Senkrechte (2 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 45, (width / 2) - 9, 54, WHITE); // Boden (3 Pixel)
+      break;
+    case 3:
+      LCD_SetArealColor((width / 2) - 36, 9, (width / 2) - 9, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) - 18, 18, (width / 2) - 9, 54, WHITE); // rechte Senkrechte (4 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 27, (width / 2) - 18, 36, WHITE); // mitte Waagrechte (2 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 45, (width / 2) - 18, 54, WHITE); // Boden (2 Pixel)
+      break;
+    case 4:
+      LCD_SetArealColor((width / 2) - 18, 9, (width / 2) - 9, 54, WHITE); // rechte Senkrechte (5 Pixel)
+      LCD_SetArealColor((width / 2) - 27, 27, (width / 2) - 18, 36, WHITE); // Mittelpunkt (1 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 9, (width / 2) - 27, 36, WHITE); // linke Senkrechte (3 Pixel)
+      break;
+    case 5:
+      LCD_SetArealColor((width / 2) - 36, 9, (width / 2) - 9, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 18, (width / 2) - 27, 36, WHITE); // linke Senkrechte (2 Pixel)
+      LCD_SetArealColor((width / 2) - 27, 27, (width / 2) - 18, 36, WHITE); // Mittelpunkt (1 Pixel)
+      LCD_SetArealColor((width / 2) - 18, 27, (width / 2) - 9, 54, WHITE); // rechte Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 45, (width / 2) - 18, 54, WHITE); // Boden (2 Pixel)
+      break;
+    case 6:
+      LCD_SetArealColor((width / 2) - 36, 9, (width / 2) - 9, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 18, (width / 2) - 27, 45, WHITE); // linke Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) - 27, 27, (width / 2) - 18, 36, WHITE); // Mittelpunkt (1 Pixel)
+      LCD_SetArealColor((width / 2) - 18, 27, (width / 2) - 9, 54, WHITE); // rechte Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 45, (width / 2) - 18, 54, WHITE); // Boden (2 Pixel)
+      break;
+    case 7:
+      LCD_SetArealColor((width / 2) - 36, 9, (width / 2) - 9, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) - 18, 18, (width / 2) - 9, 54, WHITE); // rechte Senkrechte (4 Pixel)
+      break;
+    case 8:
+      LCD_SetArealColor((width / 2) - 36, 9, (width / 2) - 9, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) - 18, 18, (width / 2) - 9, 54, WHITE); // rechte Senkrechte (4 Pixel)
+      LCD_SetArealColor((width / 2) - 27, 27, (width / 2) - 18, 36, WHITE); // Mittelpunkt (1 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 18, (width / 2) - 27, 45, WHITE); // linke Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 45, (width / 2) - 18, 54, WHITE); // Boden (2 Pixel)
+      break;
+    case 9:
+      LCD_SetArealColor((width / 2) - 36, 9, (width / 2) - 9, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) - 18, 18, (width / 2) - 9, 54, WHITE); // rechte Senkrechte (4 Pixel)
+      LCD_SetArealColor((width / 2) - 27, 27, (width / 2) - 18, 36, WHITE); // Mittelpunkt (1 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 18, (width / 2) - 27, 36, WHITE); // linke Senkrechte (2 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 45, (width / 2) - 18, 54, WHITE); // Boden (2 Pixel)
+      break;
+    case 10:
+      // 1
+      LCD_SetArealColor((width / 2) - 72, 9, (width / 2) - 54, 18, WHITE); // Dach (2 Pixel)
+      LCD_SetArealColor((width / 2) - 63, 18, (width / 2) - 54, 45, WHITE); // mitte Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) - 72, 45, (width / 2) - 45, 54, WHITE); // Boden (3 Pixel)
+      // 0
+      LCD_SetArealColor((width / 2) - 36, 9, (width / 2) - 9, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) - 18, 18, (width / 2) - 9, 54, WHITE); // rechte Senkrechte (4 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 18, (width / 2) - 27, 45, WHITE); // linke Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) - 36, 45, (width / 2) - 18, 54, WHITE); // Boden (2 Pixel)
+      break;
+  }
+
+  if (prevPlayerTwoScore != playerTwoScore) // löscht bei Punktzahlerhöhung die vorherige Zahl
+  {
+    LCD_SetArealColor((width / 2) + 9, 9, (width / 2) + 72, 54, BLACK); // Zahl wieder zu Background
+    prevPlayerTwoScore = playerTwoScore;
+  }    
+  switch (playerTwoScore) {
+    case 0:
+      LCD_SetArealColor((width / 2) + 9, 9, (width / 2) + 36, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 18, (width / 2) + 18, 45, WHITE); // rechte Senkrechte (4 Pixel)
+      LCD_SetArealColor((width / 2) + 27, 18, (width / 2) + 36, 54, WHITE); // linke Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 45, (width / 2) + 27, 54, WHITE); // Boden (2 Pixel)
+      break;
+    case 1:
+      LCD_SetArealColor((width / 2) + 9, 9, (width / 2) + 27, 18, WHITE); // Dach (2 Pixel)
+      LCD_SetArealColor((width / 2) + 18, 18, (width / 2) + 27, 45, WHITE); // mitte Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 45, (width / 2) + 36, 54, WHITE); // Boden (3 Pixel)
+      break;
+    case 2:
+      LCD_SetArealColor((width / 2) + 9, 9, (width / 2) + 36, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) + 27, 18, (width / 2) + 36, 36, WHITE); // rechte Senkrechte (2 Pixel)
+      LCD_SetArealColor((width / 2) + 18, 27, (width / 2) + 27, 36, WHITE); // Mittelpunkt (1 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 27, (width / 2) + 18, 45, WHITE); // linke Senkrechte (2 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 45, (width / 2) + 36, 54, WHITE); // Boden (3 Pixel)
+      break;
+    case 3:
+      LCD_SetArealColor((width / 2) + 9, 9, (width / 2) + 36, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) + 27, 18, (width / 2) + 36, 54, WHITE); // rechte Senkrechte (4 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 27, (width / 2) + 27, 36, WHITE); // mitte Waagrechte (2 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 45, (width / 2) + 27, 54, WHITE); // Boden (2 Pixel)
+      break;
+    case 4:
+      LCD_SetArealColor((width / 2) + 27, 9, (width / 2) + 36, 54, WHITE); // rechte Senkrechte (5 Pixel)
+      LCD_SetArealColor((width / 2) + 18, 27, (width / 2) + 27, 36, WHITE); // Mittelpunkt (1 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 9, (width / 2) + 18, 36, WHITE); // linke Senkrechte (3 Pixel)
+      break;
+    case 5:
+      LCD_SetArealColor((width / 2) + 9, 9, (width / 2) + 36, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 18, (width / 2) + 18, 36, WHITE); // linke Senkrechte (2 Pixel)
+      LCD_SetArealColor((width / 2) + 18, 27, (width / 2) + 27, 36, WHITE); // Mittelpunkt (1 Pixel)
+      LCD_SetArealColor((width / 2) + 27, 27, (width / 2) + 36, 54, WHITE); // rechte Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 45, (width / 2) + 27, 54, WHITE); // Boden (2 Pixel)
+      break;
+    case 6:
+      LCD_SetArealColor((width / 2) + 9, 9, (width / 2) + 36, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 18, (width / 2) + 18, 45, WHITE); // linke Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) + 18, 27, (width / 2) + 27, 36, WHITE); // Mittelpunkt (1 Pixel)
+      LCD_SetArealColor((width / 2) + 27, 27, (width / 2) + 36, 54, WHITE); // rechte Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 45, (width / 2) + 27, 54, WHITE); // Boden (2 Pixel)
+      break;
+    case 7:
+      LCD_SetArealColor((width / 2) + 9, 9, (width / 2) + 36, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) + 27, 18, (width / 2) + 36, 54, WHITE); // rechte Senkrechte (4 Pixel)
+      break;
+    case 8:
+      LCD_SetArealColor((width / 2) + 9, 9, (width / 2) + 36, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) + 27, 18, (width / 2) + 36, 54, WHITE); // rechte Senkrechte (4 Pixel)
+      LCD_SetArealColor((width / 2) + 18, 27, (width / 2) + 27, 36, WHITE); // Mittelpunkt (1 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 18, (width / 2) + 18, 45, WHITE); // linke Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 45, (width / 2) + 27, 54, WHITE); // Boden (2 Pixel)
+      break;
+    case 9:
+      LCD_SetArealColor((width / 2) + 9, 9, (width / 2) + 36, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) + 27, 18, (width / 2) + 36, 54, WHITE); // rechte Senkrechte (4 Pixel)
+      LCD_SetArealColor((width / 2) + 18, 27, (width / 2) + 27, 36, WHITE); // Mittelpunkt (1 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 18, (width / 2) + 18, 36, WHITE); // linke Senkrechte (2 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 45, (width / 2) + 27, 54, WHITE); // Boden (2 Pixel)
+      break;
+    case 10:
+      // 1
+      LCD_SetArealColor((width / 2) + 9, 9, (width / 2) + 27, 18, WHITE); // Dach (2 Pixel)
+      LCD_SetArealColor((width / 2) + 18, 18, (width / 2) + 27, 45, WHITE); // mitte Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) + 9, 45, (width / 2) + 36, 54, WHITE); // Boden (3 Pixel)
+      // 0
+      LCD_SetArealColor((width / 2) + 45, 9, (width / 2) + 72, 18, WHITE); // Dach (3 Pixel)
+      LCD_SetArealColor((width / 2) + 63, 18, (width / 2) + 72, 54, WHITE); // rechte Senkrechte (4 Pixel)
+      LCD_SetArealColor((width / 2) + 45, 18, (width / 2) + 54, 45, WHITE); // linke Senkrechte (3 Pixel)
+      LCD_SetArealColor((width / 2) + 45, 45, (width / 2) + 63, 54, WHITE); // Boden (2 Pixel)
+      break;
+  }
+}
+
+/*
+*   This method displays the powerups. Used in singleplayer and multiplayer.
+*/
+void displayPowerUps() 
+{
+  for (int i = 0; i < numberOfPowerUps; ++i) 
+  {
+    PowerUp& currentPowerUp = powerUps[i];
+    LCD_SetArealColor(currentPowerUp.xPos, currentPowerUp.yPos, currentPowerUp.xPos + powerUpDimension, currentPowerUp.yPos + powerUpDimension, currentPowerUp.color);
+  }
+}
+
+/*
+*   Executes the yellow racket-powerup. Used in singleplayer and multiplayer.
+*/
+void racketPowerUp(Ball& currentBall)
+{
+  if (modi == SINGLEPLAYER) { 
+    if (!(playerOneRacketHeight >= height + 10)) {
+      playerOneRacketHeight+= 10;
+      return;
+    }
+  }
+  if (currentBall.xDir < 0){
+    playerOneRacketHeight += 10;
+    playerTwoRacketHeight -= 10;
+  } else {
+    playerOneRacketHeight -= 10;
+    playerTwoRacketHeight += 10;
+  }
+  if (playerTwoRacketHeight <= 0) 
+  {
+    playerTwoRacketHeight = 10;
+  }
+  if (playerOneRacketHeight <= 0) 
+  {
+    playerOneRacketHeight = 10;
+  }
+  LCD_SetArealColor(playerOneRacketX, 0, playerOneRacketX + playerRacketX, height, BLACK);
+  LCD_SetArealColor(playerTwoRacketX, 0, playerTwoRacketX + playerRacketX, height, BLACK);
+  printCurrentGame();
+}
+
+/*
+*   Executes the white mirror-powerup. Used in singleplayer and multiplayer.
+*/
+void mirrorPowerUp() {
+  for (int i = 0; i < numberOfBalls; ++i) {
+    Ball& ball = balls[i];
+    if (millis() % 2 == 1) {
+      ball.yDir *= -1;
+    } else {
+      ball.xDir *= -1;
+    }
+  }
+}
+
+/*
+*   Executes the blue speed-powerup. Used in singleplayer and multiplayer.
+*/
+void speedPowerUp() 
+{
+  for (int i = 0; i < numberOfBalls; ++i) 
+  {
+    Ball& ball = balls[i];
+    if (ball.xDir < 0) 
+    {
+      ball.xDir -= 1;
+    } else {
+      ball.xDir += 1;
+    }
+  }
+}
+
+/*
+*   Removes powerUps on screen. Used in multiplayer.
+*/
+void clearPowerUps() 
+{
+  for (int i = 0; i < numberOfPowerUps; ++i) 
+  {
+    PowerUp& currentPowerUp = powerUps[i];
+    LCD_SetArealColor(currentPowerUp.xPos, currentPowerUp.yPos, currentPowerUp.xPos + powerUpDimension, currentPowerUp.yPos + powerUpDimension, BLACK);
+  }
+  powerUps[5];
+  numberOfPowerUps = 0;
+}
+
+/*
+*   This method clears the previous position of the balls.
+*/
+void clearBalls()
+{
+  for (int i = 0; i < numberOfBalls; ++i) 
+  {
+    Ball& ball = balls[i];
+    LCD_SetArealColor(ball.xPrev, ball.yPrev, ball.xPrev + pointDimension, ball.yPrev + pointDimension, BLACK);
+    LCD_SetArealColor(ball.xPos, ball.yPos, ball.xPos + pointDimension, ball.yPos + pointDimension, BLACK);
+  }
+  balls[3];
+  numberOfBalls = 0;
+}
+
+/*
+*   This method prints the current position of the balls.
+*/
+void displayBalls() 
+{
+  for (int i = 0; i < numberOfBalls; ++i) 
+  {
+    Ball& ball = balls[i];
+    LCD_SetArealColor(ball.xPos, ball.yPos, ball.xPos + pointDimension, ball.yPos + pointDimension, GREEN);
+  }
+}
+
+/*
+*   This method creates a new instance of the multiplayer game.
+*/
+void createGame()
+{
+  LCD_SetArealColor(40, 160, 440, 190, BLACK); // löscht "MOVE JOYSTICKS..."
+  printMiddleLineAndScore();
+  playerOneScore = playerTwoScore = numberOfPowerUps = 0;
+  playerOneReady = playerTwoReady = 2;
+  balls[0] = Ball();
+  balls[0].xDir = xDirStartBall * ((millis() % 3) + 2);
+  numberOfBalls = 1;    
+  displayBalls();
+  gameStarted = true;
+  playerOneRacketHeight = playerTwoRacketHeight = playerRacketY;
+  countdown(218, 122);
+}
+
+/*
+*   Composed method to update the racket's positions.
+*/
+void updateGame()
+{
+  printPrevGame();
+  if (modi == MULTIPLAYER){
+    //positionRacketOne();
+    positionRacketTwo();
+  }
+  //positionRacketTwo();
+  positionRacketOne();
+  printCurrentGame();
+}
+
+/*
+*   This method updates the whereabouts of the ball.
+*/
+void updateBallCoordinates(Ball& ball)
+{
+  if (ball.xPos != ball.xPrev || ball.yPos != ball.yPrev) {      
+    LCD_SetArealColor(ball.xPrev, ball.yPrev, ball.xPrev + pointDimension, ball.yPrev + pointDimension, BLACK);
+    LCD_SetArealColor(ball.xPos, ball.yPos, ball.xPos + pointDimension, ball.yPos + pointDimension, GREEN);
+    ball.yPrev = ball.yPos;
+    ball.xPrev = ball.xPos;
+  }
+}
+
+
+/*
+*   This method is used for the bouncing off of the top and lower part of the screen and determining which player scored the point (Multiplayer).
+*/
+void updateBallCollision(Ball& ball)
+{
+  if (ball.xPos >= width || ball.xPos <= 0) {
+    ball.xDir = ball.xDir * (-1);
+    if (modi == MULTIPLAYER){
+      if (ball.xPos >= width) {
+        playerOneScore++;
+        xDirStartBall = -1;
+      } else {
+        playerTwoScore++;
+        xDirStartBall = 1;
+      }
+      scorePoint();
+      return;
+    }
+  }
+  // Richtungswechsel oben / unten
+  if (ball.yPos >= height || ball.yPos <= 0) {
+    ball.yDir *= -1;
+  }
+}
+
+/*
+*   Gets called, when a ball hits a powerup. This method makes sure the powerup gets triggered and removed after executing it.
+*/
+void handlePowerUpTrigger(Ball& ball)
+{
+  for (int j = 0; j < numberOfPowerUps; ++j) 
+    {
+      PowerUp& currPower = powerUps[j];
+      if (isBallInPowerUp(ball, currPower)) 
+        {
+          switch (currPower.type) {
+            case 0: // Ball, PINK
+              if (numberOfBalls != 3) {
+                if (modi == SINGLEPLAYER) {
+                  balls[numberOfBalls] = Ball(modi);
+                } else {
+                  balls[numberOfBalls] = Ball();
+                  balls[numberOfBalls].yPos = (millis() % 290) + 10;
+                  balls[numberOfBalls].xDir = ball.xDir * ((millis() % 2) + 1);
+                }
+                newBalls[numberOfBalls] = balls[numberOfBalls];
+                ++numberOfBalls;
+                displayBalls();
+              }
+              break;
+            case 1: // Speed, CYAN
+              speedPowerUp();
+              break;
+            case 2: // Racket, YELLOW
+              racketPowerUp(ball);
+              break;
+            case 3: // WHITE
+              mirrorPowerUp();
+              break;
+            default:
+              LCD_Clear(WHITE);
+          }
+          LCD_SetArealColor(currPower.xPos, currPower.yPos, currPower.xPos + powerUpDimension, currPower.yPos + powerUpDimension, BLACK);
+          for (int k = j; k < numberOfPowerUps - 1; ++k) {
+            newPowerUps[k] = newPowerUps[k + 1];
+          }
+          //j++;
+        numberOfPowerUps = numberOfPowerUps - 1;
+      }
+    }
+    for (int p = 0; p < numberOfPowerUps; ++p) {
+      powerUps[p] = newPowerUps[p];
+    }
+}
+
+/*
+*   Returns boolean if the ball is in a particular powerup. (Used in singleplayer and multiplayer)
+*/
+bool isBallInPowerUp(Ball& ball, PowerUp& powerUp)
+{
+  return ( (((ball.xPos >= powerUp.xPos) && (ball.xPos <= powerUp.xPos + powerUpDimension)) && ((ball.yPos >= powerUp.yPos) && (ball.yPos <= powerUp.yPos + powerUpDimension))) // obere linke Ecke
+          || (((ball.xPos + pointDimension >= powerUp.xPos) && (ball.xPos + pointDimension <= powerUp.xPos + powerUpDimension)) && ((ball.yPos >= powerUp.yPos) && (ball.yPos <= powerUp.yPos + powerUpDimension))) // obere rechte ecke
+          || (((ball.xPos + pointDimension >= powerUp.xPos) && (ball.xPos + pointDimension <= powerUp.xPos + powerUpDimension)) && ((ball.yPos + pointDimension >= powerUp.yPos) && (ball.yPos + pointDimension <= powerUp.yPos + powerUpDimension))) // untere rechte Ecke
+          || (((ball.xPos >= powerUp.xPos) && (ball.xPos <= powerUp.xPos + powerUpDimension)) && ((ball.yPos + pointDimension >= powerUp.yPos) && (ball.yPos + pointDimension <= powerUp.yPos + powerUpDimension)))); // untere linke Ecke
+}
+
+/*
+*   This method is called to color the singleplayer field after starting the game. Only called once per game.
+*/
+void colorField()
+{
+  for (int i = 0; i < BRICK_ROW; ++i) {
+    for (int j = 0; j < BRICK_COL; ++j) {
+      ColorField currentBrick = bricks[i][j];
+      LCD_SetArealColor(currentBrick.xPos, currentBrick.yPos, currentBrick.xEndPos, currentBrick.yEndPos, currentBrick.color);
+    }
+  }
+}
+
+/*
+*   Initializes the brick field for singleplayer.
+*/
+void initializeBrickField()
+{
+  for (int i = 0; i < BRICK_ROW; ++i) {
+    for (int j = 0; j < BRICK_COL; ++j) {
+      bricks[i][j] = ColorField(i,j);
+    }
+  }
+}
+
+/*
+*    Used for performance reasons. Colors a particular field, instead of printing the entire screen. (Singleplayer)
+*/
+void colorParticularField(int colonIndex, int rowIndex)
+{
+  ColorField& field = bricks[colonIndex][rowIndex];
+  if (field.color == BLACK) { return; }
+  field.decreaseColor();
+  //LCD_Clear(BLUE);
+  LCD_SetArealColor(field.xPos, field.yPos, field.xEndPos, field.yEndPos, field.color);
+}
+
+/*
+*   Similar to colorParticularField, but it called after every hit.
+*/
+void colorFieldAfterHit(int colon, int row)
+{
+  ColorField field = bricks[colon][row];
+  if (field.color != BLACK) {
+    LCD_SetArealColor(field.xPos, field.yPos, field.xEndPos, field.yEndPos, field.color);
+  }
+}
+
+/*
+*   Checks if a colorField is being hit and calculates which one. (Singleplayer)
+*/
+void hitColorField(Ball& ball)
+{
+  if (ball.xPos >= FIELD_WIDTH || ball.yPos <= 0 || ball.yPos >= height) { return; }
+  int colonIndex = ball.yPos / (height / BRICK_ROW); // 64
+  int rowIndex  = ball.xPos / (FIELD_WIDTH / BRICK_COL); // 40
+  if (bricks[colonIndex][rowIndex].color == BLACK) { return; }
+  if (rowIndex >= BRICK_ROW && rowIndex < 0) { // 7
+    return; 
+  } 
+  if (colonIndex >= BRICK_COL && colonIndex < 0) { // 4
+    return; 
+  } 
+  //GUI_DisNum(200, 200, rowIndex, myFont, BLACK, WHITE);
+  //GUI_DisString_EN(200, 200, bricks[colonIndex][rowIndex].color, myFont, BLACK,WHITE);
+  if (bricks[colonIndex][rowIndex].color != BLACK)
+  {
+    currentCol = colonIndex;
+    currentRow = rowIndex;
+    colorParticularField(colonIndex, rowIndex);
+    if (ball.xDir > 0) {
+      ball.yDir *= -1;
+    } else {
+      ball.xDir *= -1;
+    }
+  }
+}
+
+/*
+*   Displays title Screen
+*/
+void displayStartScreen()
+{
+  // P
+  LCD_SetArealColor(50, 50, 65, 170, WHITE); // linke Senkrechte
+  LCD_SetArealColor(65, 50, 110, 65, WHITE); // Dach
+  LCD_SetArealColor(110, 65, 125, 110, WHITE); // rechte SR
+  LCD_SetArealColor(65, 110, 110, 125, WHITE); // mittlere WR
+  // O
+  LCD_SetArealColor(140, 65, 155, 155, WHITE); // linke Senkrechte
+  LCD_SetArealColor(155, 50, 200, 65, WHITE); // Dach
+  LCD_SetArealColor(200, 65, 215, 155, WHITE); // rechte SR
+  LCD_SetArealColor(155, 155, 200, 170, WHITE); // Boden
+  // N
+  LCD_SetArealColor(230, 50, 245, 170, WHITE); // linke Senkrechte
+  LCD_SetArealColor(290, 50, 305, 170, WHITE); // rechte Senkrechte
+  LCD_SetArealColor(245, 80, 260, 95, WHITE); // Punkt 1
+  LCD_SetArealColor(260, 95, 275, 110, WHITE); // Punkt 2
+  LCD_SetArealColor(275, 110, 290, 125, WHITE); // Punkt 3
+  // G
+  LCD_SetArealColor(320, 65, 335, 155, WHITE); // linke Senkrechte
+  LCD_SetArealColor(335, 50, 380, 65, WHITE); // Dach
+  LCD_SetArealColor(380, 65, 395, 80, WHITE); // rechts oben
+  LCD_SetArealColor(335, 155, 380, 170, WHITE); // Boden
+  LCD_SetArealColor(380, 125, 395, 155, WHITE); // rechts unten
+  LCD_SetArealColor(365, 125, 380, 140, WHITE);
+  // +
+  LCD_SetArealColor(410, 95, 455, 110, WHITE);
+  LCD_SetArealColor(425, 80, 440, 125, WHITE);
+
+  // b
+  LCD_SetArealColor(50, 220, 55, 250, WHITE); // linke Senkrechte
+  LCD_SetArealColor(55, 235, 60, 240, WHITE); // Punkt
+  LCD_SetArealColor(55, 245, 60, 250, WHITE); // Punkt
+  LCD_SetArealColor(60, 235, 65, 250, WHITE); // rechte Senkrechte
+  // y
+  LCD_SetArealColor(70, 235, 75, 250, WHITE); // linke Senkrechte
+  LCD_SetArealColor(70, 255, 80, 260, WHITE); // Boden
+  LCD_SetArealColor(75, 245, 80, 250, WHITE); // Punkt
+  LCD_SetArealColor(80, 235, 85, 260, WHITE); // rechte Senkrechte
+
+  // L
+  LCD_SetArealColor(110, 200, 120, 250, WHITE); // linke Senkrechte
+  LCD_SetArealColor(120, 240, 160, 250, WHITE); // rechte Senkrechte
+  // M
+  LCD_SetArealColor(170, 200, 180, 250, WHITE); // linke Senkrechte
+  LCD_SetArealColor(180, 200, 210, 210, WHITE); // Waagrechte
+  LCD_SetArealColor(190, 210, 200, 240, WHITE); // Mitte
+  LCD_SetArealColor(210, 200, 220, 250, WHITE); // rechte Senkrechte
+  // N
+  LCD_SetArealColor(230, 200, 240, 250, WHITE); // linke Senkrechte
+  LCD_SetArealColor(240, 200, 270, 210, WHITE); // Waagrechte
+  LCD_SetArealColor(270, 200, 280, 250, WHITE); // rechte Senkrechte
+  // T
+  LCD_SetArealColor(310, 210, 320, 250, WHITE); // Senkrechte
+  LCD_SetArealColor(290, 200, 340, 210, WHITE); // Waagrechte
+
+  // Circle
+  LCD_SetArealColor(350, 204, 352, 214, WHITE); // linke Senkrechte
+  LCD_SetArealColor(354, 200, 364, 202, WHITE); // Dach
+  LCD_SetArealColor(354, 216, 364, 218, WHITE); // Boden
+  LCD_SetArealColor(366, 204, 368, 214, WHITE); // rechte Senkrechte
+  LCD_SetArealColor(364, 202, 366, 204, WHITE); // o/r
+  LCD_SetArealColor(352, 202, 354, 204, WHITE); // o/l
+  LCD_SetArealColor(364, 214, 366, 216, WHITE); // u/r
+  LCD_SetArealColor(352, 214, 354, 216, WHITE); // u/l
+  // C
+  LCD_SetArealColor(354, 206, 356, 212, WHITE); // linke Senkrechte
+  LCD_SetArealColor(356, 204, 362, 206, WHITE); // Dach
+  LCD_SetArealColor(356, 212, 362, 214, WHITE); // Boden
+
+}
+
+
+/*
+*   displays choice Screen
+*/
+void showChoiceScreen()
+{
+  LCD_Clear(BLACK);
+  winDecision = 0;
+  LCD_SetArealColor(0, 155, 480, 165, WHITE); // Mittellinie
+  int pix = 10; // Schriftgrösse: 8 Pixel pro Pixel
+  // MULTIPLAYER
+  int xm = 125; // 30 + 80 + 15
+  int ym = 20;
+  // M
+  LCD_SetArealColor(xm + 0, ym + 0, xm + pix, ym + 5 * pix, WHITE);
+  LCD_SetArealColor(xm + pix, ym + pix, xm + 2 * pix, ym + 2 * pix, WHITE);
+  LCD_SetArealColor(xm + 2 * pix, ym + 2 * pix, xm + 3 * pix, ym + 3 * pix, WHITE);
+  LCD_SetArealColor(xm + 3 * pix, ym + pix, xm + 4 * pix, ym + 2 * pix, WHITE);
+  LCD_SetArealColor(xm + 4 * pix, ym + 0, xm + 5 * pix, ym + 5 * pix, WHITE);
+  // U
+  LCD_SetArealColor(xm + 6 * pix, ym + 0, xm + 7 * pix, ym + 5 * pix, WHITE);
+  LCD_SetArealColor(xm + 7 * pix, ym + 4 * pix, xm + 8 * pix, ym + 5 * pix, WHITE);
+  LCD_SetArealColor(xm + 8 * pix, ym + 0, xm + 9 * pix, ym + 5 * pix, WHITE);
+  // L
+  LCD_SetArealColor(xm + 10 * pix, ym + 0, xm + 11 * pix, ym + 5 * pix, WHITE);
+  LCD_SetArealColor(xm + 11 * pix, ym + 4 * pix, xm + 13 * pix, ym + 5 * pix, WHITE);
+  // T
+  LCD_SetArealColor(xm + 13 * pix, ym + 0, xm + 16 * pix, ym + pix, WHITE);
+  LCD_SetArealColor(xm + 14 * pix, ym + pix, xm + 15 * pix, ym + 5 * pix, WHITE);
+  // I
+  LCD_SetArealColor(xm + 17 * pix, ym + 0, xm + 18 * pix, ym + 5 * pix, WHITE);
+  // -
+  LCD_SetArealColor(xm + 19 * pix, ym + 2 * pix, xm + 22 * pix, ym + 3 * pix, WHITE);
+  
+
+  int xp = xm;//xm + 19 * pix;
+  int yp = ym + 60;//ym;
+  // P
+  LCD_SetArealColor(xp + 0, yp + 0, xp + pix, yp + 5 * pix, WHITE);
+  LCD_SetArealColor(xp + pix, yp + 0, xp + 3 * pix, yp + pix, WHITE);
+  LCD_SetArealColor(xp + 2 * pix, yp + pix, xp + 3 * pix, yp + 2 * pix, WHITE);
+  LCD_SetArealColor(xp + pix, yp + 2 * pix, xp + 3 * pix, yp + 3 * pix, WHITE);
+  // L
+  LCD_SetArealColor(xp + 4 * pix, yp + 0, xp + 5 * pix, yp + 5 * pix, WHITE);
+  LCD_SetArealColor(xp + 5 * pix, yp + 4 * pix, xp + 7 * pix, yp + 5 * pix, WHITE);
+  // A
+  LCD_SetArealColor(xp + 8 * pix, yp + 0, xp + 9 * pix, yp + 5 * pix, WHITE);
+  LCD_SetArealColor(xp + 9 * pix, yp + 0, xp + 10 * pix, yp + pix, WHITE);
+  LCD_SetArealColor(xp + 10 * pix, yp + 0, xp + 11 * pix, yp + 5 * pix, WHITE);
+  LCD_SetArealColor(xp + 9 * pix, yp + 2 * pix, xp + 10 * pix, yp + 3 * pix, WHITE);
+  // Y
+  LCD_SetArealColor(xp + 12 * pix, yp + 0, xp + 13 * pix, yp + 3 * pix, WHITE);
+  LCD_SetArealColor(xp + 14 * pix, yp + 0, xp + 15 * pix, yp + 3 * pix, WHITE);
+  LCD_SetArealColor(xp + 13 * pix, yp + 2 * pix, xp + 14 * pix, yp + 5 * pix, WHITE);
+  // E
+  LCD_SetArealColor(xp + 16 * pix, yp + 0, xp + 19 * pix, yp + pix, WHITE);
+  LCD_SetArealColor(xp + 16 * pix, yp + 2 * pix, xp + 19 * pix, yp + 3 * pix, WHITE);
+  LCD_SetArealColor(xp + 16 * pix, yp + 4 * pix, xp + 19 * pix, yp + 5 * pix, WHITE);
+  LCD_SetArealColor(xp + 16 * pix, yp + 0, xp + 17 * pix, yp + 5 * pix, WHITE);
+  // R
+  LCD_SetArealColor(xp + 20 * pix, yp + 0, xp + 21 * pix, yp + 5 * pix, WHITE);
+  LCD_SetArealColor(xp + 21 * pix, yp + 0, xp + 23 * pix, yp + pix, WHITE);
+  LCD_SetArealColor(xp + 22 * pix, yp + pix, xp + 23 * pix, yp + 2 * pix, WHITE);
+  LCD_SetArealColor(xp + 21 * pix, yp + 2 * pix, xp + 22 * pix, yp + 3 * pix, WHITE);
+  LCD_SetArealColor(xp + 22 * pix, yp + 3 * pix, xp + 23 * pix, yp + 5 * pix, WHITE);
+
+  int xs = 30;
+  int ys = 190;
+  //S
+  LCD_SetArealColor(xs, ys, xs + 3 * pix, ys + pix, WHITE);
+  LCD_SetArealColor(xs, ys + 2 * pix, xs + 3 * pix, ys + 3 * pix, WHITE);
+  LCD_SetArealColor(xs, ys + 4 * pix, xs + 3 * pix, ys + 5 * pix, WHITE);
+  LCD_SetArealColor(xs, ys + pix, xs + pix, ys + 2 * pix, WHITE);
+  LCD_SetArealColor(xs + 2 * pix, ys + 3 * pix, xs + 3 * pix, ys + 4 * pix, WHITE);
+  // I
+  LCD_SetArealColor(xs + 4 * pix, ys, xs + 5 * pix, ys + 5 * pix, WHITE);
+  // N
+  LCD_SetArealColor(xs + 6 * pix, ys, xs + 7 * pix, ys + 5 * pix, WHITE);
+  LCD_SetArealColor(xs + 7 * pix, ys + pix, xs + 8 * pix, ys + 2 * pix, WHITE);
+  LCD_SetArealColor(xs + 8 * pix, ys + 2 * pix, xs + 9 * pix, ys + 3 * pix, WHITE);
+  LCD_SetArealColor(xs + 9 * pix, ys + 3 * pix, xs + 10 * pix, ys + 4 * pix, WHITE);
+  LCD_SetArealColor(xs + 10 * pix, ys, xs + 11 * pix, ys + 5 * pix, WHITE);
+  // G
+  LCD_SetArealColor(xs + 12 * pix, ys, xs + 13 * pix, ys + 5 * pix, WHITE);
+  LCD_SetArealColor(xs + 13 * pix, ys, xs + 16 * pix, ys + pix, WHITE);
+  LCD_SetArealColor(xs + 13 * pix, ys + 4 * pix, xs + 16 * pix, ys + 5 * pix, WHITE);
+  LCD_SetArealColor(xs + 14 * pix, ys + 2 * pix, xs + 16 * pix, ys + 3 * pix, WHITE);
+  LCD_SetArealColor(xs + 15 * pix, ys + 3 * pix, xs + 16 * pix, ys + 4 * pix, WHITE);
+  // L
+  LCD_SetArealColor(xs + 17 * pix, ys, xs + 18 * pix, ys + 5 * pix, WHITE);
+  LCD_SetArealColor(xs + 18 * pix, ys + 4 * pix, xs + 20 * pix, ys + 5 * pix, WHITE);
+  // E
+  LCD_SetArealColor(xs + 21 * pix, ys, xs + 22 * pix, ys + 5 * pix, WHITE);
+  LCD_SetArealColor(xs + 22 * pix, ys, xs + 24 * pix, ys + pix, WHITE);
+  LCD_SetArealColor(xs + 22 * pix, ys + 2 * pix, xs + 24 * pix, ys + 3 * pix, WHITE);
+  LCD_SetArealColor(xs + 22 * pix, ys + 4 * pix, xs + 24 * pix, ys + 5 * pix, WHITE);
+  // -
+  LCD_SetArealColor(xs + 25 * pix, ys + 2 * pix, xs + 28 * pix, ys + 3 * pix, WHITE);
+
+  xp = xs;
+  yp = ys + 60;
+  // P
+  LCD_SetArealColor(xp, yp, xp + pix, yp + 5 * pix, WHITE);
+  LCD_SetArealColor(xp + pix, yp, xp + 3 * pix, yp + pix, WHITE);
+  LCD_SetArealColor(xp + 2 * pix, yp + pix, xp + 3 * pix, yp + 2 * pix, WHITE);
+  LCD_SetArealColor(xp + pix, yp + 2 * pix, xp + 3 * pix, yp + 3 * pix, WHITE);
+  // L
+  LCD_SetArealColor(xp + 4 * pix, yp, xp + 5 * pix, yp + 5 * pix, WHITE);
+  LCD_SetArealColor(xp + 5 * pix, yp + 4 * pix, xp + 7 * pix, yp + 5 * pix, WHITE);
+  // A
+  LCD_SetArealColor(xp + 8 * pix, yp, xp + 9 * pix, yp + 5 * pix, WHITE);
+  LCD_SetArealColor(xp + 9 * pix, yp, xp + 10 * pix, yp + pix, WHITE);
+  LCD_SetArealColor(xp + 10 * pix, yp, xp + 11 * pix, yp + 5 * pix, WHITE);
+  LCD_SetArealColor(xp + 9 * pix, yp + 2 * pix, xp + 10 * pix, yp + 3 * pix, WHITE);
+  // Y
+  LCD_SetArealColor(xp + 12 * pix, yp, xp + 13 * pix, yp + 3 * pix, WHITE);
+  LCD_SetArealColor(xp + 14 * pix, yp, xp + 15 * pix, yp + 3 * pix, WHITE);
+  LCD_SetArealColor(xp + 13 * pix, yp + 2 * pix, xp + 14 * pix, yp + 5 * pix, WHITE);
+  // E
+  LCD_SetArealColor(xp + 16 * pix, yp, xp + 19 * pix, yp + pix, WHITE);
+  LCD_SetArealColor(xp + 16 * pix, yp + 2 * pix, xp + 19 * pix, yp + 3 * pix, WHITE);
+  LCD_SetArealColor(xp + 16 * pix, yp + 4 * pix, xp + 19 * pix, yp + 5 * pix, WHITE);
+  LCD_SetArealColor(xp + 16 * pix, yp, xp + 17 * pix, yp + 5 * pix, WHITE);
+  // R
+  LCD_SetArealColor(xp + 20 * pix, yp, xp + 21 * pix, yp + 5 * pix, WHITE);
+  LCD_SetArealColor(xp + 21 * pix, yp, xp + 23 * pix, yp + pix, WHITE);
+  LCD_SetArealColor(xp + 22 * pix, yp + pix, xp + 23 * pix, yp + 2 * pix, WHITE);
+  LCD_SetArealColor(xp + 21 * pix, yp + 2 * pix, xp + 22 * pix, yp + 3 * pix, WHITE);
+  LCD_SetArealColor(xp + 22 * pix, yp + 3 * pix, xp + 23 * pix, yp + 5 * pix, WHITE);
+
+  // Pfeil nach oben
+  int xup = 370;
+  int yup = 28;
+  pix = 16;
+  // right up
+  LCD_SetArealColor(xup + 2 * pix, yup, xup + 3 * pix, yup + pix, BLUE);
+  LCD_SetArealColor(xup + pix, yup + pix, xup + 2 * pix, yup + 2 * pix, BLUE);
+  LCD_SetArealColor(xup + 3 * pix, yup + pix, xup + 4 * pix, yup + 2 * pix, BLUE);
+  LCD_SetArealColor(xup, yup + 2 * pix, xup + pix, yup + 3 * pix, BLUE);
+  LCD_SetArealColor(xup + 4 * pix, yup + 2 * pix, xup + 5 * pix, yup + 3 * pix, BLUE);
+
+  LCD_SetArealColor(xup + 2 * pix, yup + 3 * pix, xup + 3 * pix, yup + 4 * pix, BLUE);
+  LCD_SetArealColor(xup + pix, yup + 4 * pix, xup + 2 * pix, yup + 5 * pix, BLUE);
+  LCD_SetArealColor(xup + 3 * pix, yup + 4 * pix, xup + 4 * pix, yup + 5 * pix, BLUE);
+  LCD_SetArealColor(xup, yup + 5 * pix, xup + pix, yup + 6 * pix, BLUE);
+  LCD_SetArealColor(xup + 4 * pix, yup + 5 * pix, xup + 5 * pix, yup + 6 * pix, BLUE);
+
+  // left up
+  xup = 30;
+  LCD_SetArealColor(xup + 2 * pix, yup, xup + 3 * pix, yup + pix, RED);
+  LCD_SetArealColor(xup + pix, yup + pix, xup + 2 * pix, yup + 2 * pix, RED);
+  LCD_SetArealColor(xup + 3 * pix, yup + pix, xup + 4 * pix, yup + 2 * pix, RED);
+  LCD_SetArealColor(xup, yup + 2 * pix, xup + pix, yup + 3 * pix, RED);
+  LCD_SetArealColor(xup + 4 * pix, yup + 2 * pix, xup + 5 * pix, yup + 3 * pix, RED);
+
+  LCD_SetArealColor(xup + 2 * pix, yup + 3 * pix, xup + 3 * pix, yup + 4 * pix, RED);
+  LCD_SetArealColor(xup + pix, yup + 4 * pix, xup + 2 * pix, yup + 5 * pix, RED);
+  LCD_SetArealColor(xup + 3 * pix, yup + 4 * pix, xup + 4 * pix, yup + 5 * pix, RED);
+  LCD_SetArealColor(xup, yup + 5 * pix, xup + pix, yup + 6 * pix, RED);
+  LCD_SetArealColor(xup + 4 * pix, yup + 5 * pix, xup + 5 * pix, yup + 6 * pix, RED);
+
+  // right down
+  int xd = 370;
+  int yd = 190;
+  LCD_SetArealColor(xd + 2 * pix, yd + 2 * pix, xd + 3 * pix, yd + 3 * pix, BLUE);
+  LCD_SetArealColor(xd + pix, yd + pix, xd + 2 * pix, yd + 2 * pix, BLUE);
+  LCD_SetArealColor(xd + 3 * pix, yd + pix, xd + 4 * pix, yd + 2 * pix, BLUE);
+  LCD_SetArealColor(xd, yd, xd + pix, yd + pix, BLUE);
+  LCD_SetArealColor(xd + 4 * pix, yd, xd + 5 * pix, yd + pix, BLUE);
+
+  LCD_SetArealColor(xd + 2 * pix, yd + 5 * pix, xd + 3 * pix, yd + 6 * pix, BLUE);
+  LCD_SetArealColor(xd + pix, yd + 4 * pix, xd + 2 * pix, yd + 5 * pix, BLUE);
+  LCD_SetArealColor(xd + 3 * pix, yd + 4 * pix, xd + 4 * pix, yd + 5 * pix, BLUE);
+  LCD_SetArealColor(xd, yd + 3 * pix, xd + pix, yd + 4 * pix, BLUE);
+  LCD_SetArealColor(xd + 4 * pix, yd + 3 * pix, xd + 5 * pix, yd + 4 * pix, BLUE);
+
+}
+
+void countdown(int x, int y)
+{
+  int counter = 3;
+  int pix = 15;
+  while (counter > 0) {
+    LCD_SetArealColor(x, y, x + 3 * pix, y + 5 * pix, BLACK);
+    
+    switch(counter) {
+      case 3:
+        LCD_SetArealColor(x, y, x + 3 * pix, y + pix, YELLOW);
+        LCD_SetArealColor(x, y + 2 * pix, x + 3 * pix, y + 3 * pix, YELLOW);
+        LCD_SetArealColor(x, y + 4 * pix, x + 3 * pix, y + 5 * pix, YELLOW);
+        LCD_SetArealColor(x + 2 * pix, y + pix, x + 3 * pix, y + 2 * pix, YELLOW);
+        LCD_SetArealColor(x + 2 * pix, y + 3 * pix, x + 3 * pix, y + 4 * pix, YELLOW);
+        break;
+      case 2:
+        LCD_SetArealColor(x, y, x + 3 * pix, y + pix, YELLOW);
+        LCD_SetArealColor(x, y + 2 * pix, x + 3 * pix, y + 3 * pix, YELLOW);
+        LCD_SetArealColor(x, y + 4 * pix, x + 3 * pix, y + 5 * pix, YELLOW);
+        LCD_SetArealColor(x + 2 * pix, y + pix, x + 3 * pix, y + 2 * pix, YELLOW);
+        LCD_SetArealColor(x, y + 3 * pix, x + pix, y + 4 * pix, YELLOW);
+        break;
+      case 1:
+        LCD_SetArealColor(x, y, x + 2 * pix, y + pix, YELLOW);
+        LCD_SetArealColor(x, y + 4 * pix, x + 3 * pix, y + 5 * pix, YELLOW);
+        LCD_SetArealColor(x + pix, y + pix, x + 2 * pix, y + 5 * pix, YELLOW);
+        break;
+    }
+    delay(1000);
+    counter = counter - 1;
+  }
+  LCD_SetArealColor(x, y, x + 3 * pix, y + 5 * pix, BLACK);
+
+}
+
+void showEndScreen(){
+  LCD_Clear(BLACK);
+  int pix = 24;
+  if (winDecision == 1 || winDecision == 2) { //Singleplayer
+    // YOU
+    int x = 108;
+    int y = 16;
+    // Y
+    LCD_SetArealColor(x, y, x + pix, y + 3 * pix, WHITE);
+    LCD_SetArealColor(x + 2 * pix, y, x + 3 * pix, y + 3 * pix, WHITE);
+    LCD_SetArealColor(x + pix, y + 2 * pix, x + 2 * pix, y + 5 * pix, WHITE);
+    // O
+    LCD_SetArealColor(x + 4 * pix, y, x + 7 * pix, y + pix, WHITE);
+    LCD_SetArealColor(x + 4 * pix, y + 4 * pix, x + 7 * pix, y + 5 * pix, WHITE);
+    LCD_SetArealColor(x + 4 * pix, y, x + 5 * pix, y + 5 * pix, WHITE);
+    LCD_SetArealColor(x + 6 * pix, y, x + 7 * pix, y + 5 * pix, WHITE);
+    // U
+    LCD_SetArealColor(x + 8 * pix, y + 4 * pix, x + 11 * pix, y + 5 * pix, WHITE);
+    LCD_SetArealColor(x + 8 * pix, y, x + 9 * pix, y + 5 * pix, WHITE);
+    LCD_SetArealColor(x + 10 * pix, y, x + 11 * pix, y + 5 * pix, WHITE);
+
+    if (winDecision == 1) { //YOU LOSE
+      // LOSE
+      x = 60;
+      y = y + 6 * pix;
+      // L
+      LCD_SetArealColor(x, y + 4 * pix, x + 3 * pix, y + 5 * pix, WHITE);
+      LCD_SetArealColor(x, y, x + pix, y + 5 * pix, WHITE);
+      // O
+      LCD_SetArealColor(x + 4 * pix, y, x + 7 * pix, y + pix, WHITE);
+      LCD_SetArealColor(x + 4 * pix, y + 4 * pix, x + 7 * pix, y + 5 * pix, WHITE);
+      LCD_SetArealColor(x + 4 * pix, y, x + 5 * pix, y + 5 * pix, WHITE);
+      LCD_SetArealColor(x + 6 * pix, y, x + 7 * pix, y + 5 * pix, WHITE);
+      // S
+      LCD_SetArealColor(x + 8 * pix, y, x + 11 * pix, y + pix, WHITE);
+      LCD_SetArealColor(x + 8 * pix, y + 2 * pix, x + 11 * pix, y + 3 * pix, WHITE);
+      LCD_SetArealColor(x + 8 * pix, y + 4 * pix, x + 11 * pix, y + 5 * pix, WHITE);
+      LCD_SetArealColor(x + 8 * pix, y + pix, x + 9 * pix, y + 2 * pix, WHITE);
+      LCD_SetArealColor(x + 10 * pix, y + 3 * pix, x + 11 * pix, y + 4 * pix, WHITE);
+      // E
+      LCD_SetArealColor(x + 12 * pix, y, x + 15 * pix, y + pix, WHITE);
+      LCD_SetArealColor(x + 12 * pix, y + 2 * pix, x + 15 * pix, y + 3 * pix, WHITE);
+      LCD_SetArealColor(x + 12 * pix, y + 4 * pix, x + 15 * pix, y + 5 * pix, WHITE);
+      LCD_SetArealColor(x + 12 * pix, y + pix, x + 13 * pix, y + 2 * pix, WHITE);
+      LCD_SetArealColor(x + 12 * pix, y + 3 * pix, x + 13 * pix, y + 4 * pix, WHITE);
+
+      // !
+      // TODO?
+    } else { // YOU WIN
+      // WIN
+      x = x - pix;
+      y = y + 6 * pix;
+      // W
+      LCD_SetArealColor(x, y + 4 * pix, x + 5 * pix, y + 5 * pix, WHITE);
+      LCD_SetArealColor(x, y, x + pix, y + 5 * pix, WHITE);
+      LCD_SetArealColor(x + 2 * pix, y + pix, x + 3 * pix, y + 5 * pix, WHITE);
+      LCD_SetArealColor(x + 4 * pix, y, x + 5 * pix, y + 5 * pix, WHITE);
+      // I
+      LCD_SetArealColor(x + 6 * pix, y, x + 7 * pix, y + 5 * pix, WHITE);
+      // N
+      LCD_SetArealColor(x + 8 * pix, y, x + 9 * pix, y + 5 * pix, WHITE);
+      LCD_SetArealColor(x + 12 * pix, y, x + 13 * pix, y + 5 * pix, WHITE);
+      LCD_SetArealColor(x + 9 * pix, y + pix, x + 10 * pix, y + 2 * pix, WHITE);
+      LCD_SetArealColor(x + 10 * pix, y + 2 * pix, x + 11 * pix, y + 3 * pix, WHITE);
+      LCD_SetArealColor(x + 11 * pix, y + 3 * pix, x + 12 * pix, y + 4 * pix, WHITE);
+
+      //!
+
+    }
+  } else { // Multiplayer
+    COLOR winCol = WHITE;
+    int x = 36;
+    int y = 16;
+    if (winDecision == 3) { //BLUE WINS
+      winCol = BLUE;
+      // B
+      LCD_SetArealColor(x, y, x + pix, y + 5 * pix, winCol);
+      LCD_SetArealColor(x + pix, y, x + 3 * pix, y + pix, winCol);
+      LCD_SetArealColor(x + 2 * pix, y + pix, x + 3 * pix, y + 2 * pix, winCol);
+      LCD_SetArealColor(x + pix, y + 2 * pix, x + 4 * pix, y + 3 * pix, winCol);
+      LCD_SetArealColor(x + 3 * pix, y + 3 * pix, x + 4 * pix, y + 4 * pix, winCol);
+      LCD_SetArealColor(x + pix, y + 4 * pix, x + 4 * pix, y + 5 * pix, winCol);
+      // L
+      LCD_SetArealColor(x + 5 * pix, y + 4 * pix, x + 8 * pix, y + 5 * pix, winCol);
+      LCD_SetArealColor(x + 5 * pix, y, x + 6 * pix, y + 5 * pix, winCol);
+      // U
+      LCD_SetArealColor(x + 10 * pix, y + 4 * pix, x + 11 * pix, y + 5 * pix, winCol);
+      LCD_SetArealColor(x + 9 * pix, y, x + 10 * pix, y + 5 * pix, winCol);
+      LCD_SetArealColor(x + 11 * pix, y, x + 12 * pix, y + 5 * pix, winCol);
+      // E
+      LCD_SetArealColor(x + 13 * pix, y, x + 16 * pix, y + pix, winCol);
+      LCD_SetArealColor(x + 13 * pix, y + 2 * pix, x + 16 * pix, y + 3 * pix, winCol);
+      LCD_SetArealColor(x + 13 * pix, y + 4 * pix, x + 16 * pix, y + 5 * pix, winCol);
+      LCD_SetArealColor(x + 13 * pix, y + pix, x + 14 * pix, y + 2 * pix, winCol);
+      LCD_SetArealColor(x + 13 * pix, y + 3 * pix, x + 14 * pix, y + 4 * pix, winCol);
+    } else { // RED WINS
+      winCol = RED;
+      // R
+      LCD_SetArealColor(x, y, x + pix, y + 5 * pix, winCol);
+      LCD_SetArealColor(x, y, x + 3 * pix, y + pix, winCol);
+      LCD_SetArealColor(x + 2 * pix, y, x + 3 * pix, y + 3 * pix, winCol);
+      LCD_SetArealColor(x + pix, y + 2 * pix, x + 2 * pix, y + 4 * pix, winCol);
+      LCD_SetArealColor(x + 2 * pix, y + 4 * pix, x + 3 * pix, y + 5 * pix, winCol);
+      // E
+      LCD_SetArealColor(x + 4 * pix, y, x + 7 * pix, y + pix, winCol);
+      LCD_SetArealColor(x + 4 * pix, y + 2 * pix, x + 7 * pix, y + 3 * pix, winCol);
+      LCD_SetArealColor(x + 4 * pix, y + 4 * pix, x + 7 * pix, y + 5 * pix, winCol);
+      LCD_SetArealColor(x + 4 * pix, y + pix, x + 5 * pix, y + 2 * pix, winCol);
+      LCD_SetArealColor(x + 4 * pix, y + 3 * pix, x + 5 * pix, y + 4 * pix, winCol);
+      // D
+      LCD_SetArealColor(x + 8 * pix, y, x + 11 * pix, y + pix, winCol);
+      LCD_SetArealColor(x + 8 * pix, y + 4 * pix, x + 11 * pix, y + 5 * pix, winCol);
+      LCD_SetArealColor(x + 8 * pix, y + pix, x + 9 * pix, y + 4 * pix, winCol);
+      LCD_SetArealColor(x + 11 * pix, y + pix, x + 12 * pix, y + 4 * pix, winCol);
+    }
+
+    // WINS
+    y = y + 6 * pix;
+    // W
+    LCD_SetArealColor(x, y + 4 * pix, x + 5 * pix, y + 5 * pix, winCol);
+    LCD_SetArealColor(x, y, x + pix, y + 5 * pix, winCol);
+    LCD_SetArealColor(x + 2 * pix, y + pix, x + 3 * pix, y + 5 * pix, winCol);
+    LCD_SetArealColor(x + 4 * pix, y, x + 5 * pix, y + 5 * pix, winCol);
+    // I
+    LCD_SetArealColor(x + 6 * pix, y, x + 7 * pix, y + 5 * pix, winCol);
+    // N
+    LCD_SetArealColor(x + 8 * pix, y, x + 9 * pix, y + 5 * pix, winCol);
+    LCD_SetArealColor(x + 12 * pix, y, x + 13 * pix, y + 5 * pix, winCol);
+    LCD_SetArealColor(x + 9 * pix, y + pix, x + 10 * pix, y + 2 * pix, winCol);
+    LCD_SetArealColor(x + 10 * pix, y + 2 * pix, x + 11 * pix, y + 3 * pix, winCol);
+    LCD_SetArealColor(x + 11 * pix, y + 3 * pix, x + 12 * pix, y + 4 * pix, winCol);
+    // S
+    LCD_SetArealColor(x + 14 * pix, y, x + 17 * pix, y + pix, winCol);
+    LCD_SetArealColor(x + 14 * pix, y + 2 * pix, x + 17 * pix, y + 3 *pix, winCol);
+    LCD_SetArealColor(x + 14 * pix, y + 4 * pix, x + 17 * pix, y + 5 * pix, winCol);
+    LCD_SetArealColor(x + 14 * pix, y + pix, x + 15 * pix, y + 2 * pix, winCol);
+    LCD_SetArealColor(x + 16 * pix, y + 3 * pix, x + 17 * pix, y + 4 * pix, winCol);
+
+    // !
+
+  }
+  delay(1000);
+  beforeChoice = true;
+}
